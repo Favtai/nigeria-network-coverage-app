@@ -28,8 +28,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(_file_))
 nga0_path = os.path.join(BASE_DIR, "gadm41_NGA_0.geojson")
 nga1_path = os.path.join(BASE_DIR, "gadm41_NGA_1.geojson")
 
-if not os.path.exists(nga0_path) or not os.path.exists(nga1_path):
-    st.error("❌ GeoJSON files not found in app directory.")
+if not os.path.exists(nga0_path):
+    st.error("❌ gadm41_NGA_0.geojson not found")
+    st.stop()
+
+if not os.path.exists(nga1_path):
+    st.error("❌ gadm41_NGA_1.geojson not found")
     st.stop()
 
 with open(nga0_path, "r", encoding="utf-8") as f:
@@ -38,16 +42,7 @@ with open(nga0_path, "r", encoding="utf-8") as f:
 with open(nga1_path, "r", encoding="utf-8") as f:
     states_geo = json.load(f)
 
-if not nga0_path or not nga1_path:
-    st.error("❌ GeoJSON files not found. Ensure gadm41_NGA_0.geojson and gadm41_NGA_1.geojson exist.")
-    st.stop()
-
-with open(nga0_path, "r", encoding="utf-8") as f:
-    nigeria_geo = json.load(f)
-
-with open(nga1_path, "r", encoding="utf-8") as f:
-    states_geo = json.load(f)
-
+st.success("✅ GeoJSON files loaded successfully")
 # ===============================
 # LOAD CSV DATA
 # ===============================
@@ -223,4 +218,5 @@ with tab5:
         ).add_to(m5)
 
     st_folium(m5, height=600)
+
 
