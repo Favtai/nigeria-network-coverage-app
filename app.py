@@ -1,4 +1,4 @@
-[7:46 AM, 1/8/2026] Holex Properties: import os
+import os
 import json
 import streamlit as st
 import folium
@@ -216,3 +216,4 @@ with tab2:
 # =========================
 with tab3:
     st.info("Recommended tower locations will appear here.")
+
