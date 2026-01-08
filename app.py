@@ -1,31 +1,25 @@
 import os
 import math
-import json
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
-from fpdf import FPDF
 
 # =====================================================
-# APP CONFIG
+# CONFIG
 # =====================================================
-st.set_page_config(
-    page_title="Nigeria Mobile Network Coverage",
-    layout="wide"
-)
-
+st.set_page_config(page_title="Nigeria Network Planner", layout="wide")
 st.title("🇳🇬 Nigeria Mobile Network Coverage Planning System")
-st.caption("2G | 3G | 4G • Operator Detection • Gap Analysis • Reports")
+st.caption("Coverage • No Coverage • Gap Analysis • Site Recommendation")
 
 # =====================================================
-# UTILITIES
+# HELPERS
 # =====================================================
 def find_file(name):
-    for root, _, files in os.walk("."):
-        if name in files:
-            return os.path.join(root, name)
+    for r, d, f in os.walk("."):
+        if name in f:
+            return os.path.join(r, name)
     return None
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -46,39 +40,35 @@ nga1 = find_file("gadm41_NGA_1.geojson")
 csv_file = find_file("Nigeria_2G_3G_4G_All_Operators_ArcGIS.csv")
 
 if not nga0 or not nga1:
-    st.error("Nigeria GeoJSON files missing")
+    st.error("Nigeria boundary files missing")
     st.stop()
 
 nigeria = gpd.read_file(nga0)
 states = gpd.read_file(nga1)
 
-network_df = None
-if csv_file:
-    network_df = pd.read_csv(csv_file)
+network_df = pd.read_csv(csv_file) if csv_file else None
+
+lat_col = next(c for c in network_df.columns if "lat" in c.lower())
+lon_col = next(c for c in network_df.columns if "lon" in c.lower())
+op_col  = next(c for c in network_df.columns if "operator" in c.lower())
+gen_col = next(c for c in network_df.columns if "generation" in c.lower())
 
 # =====================================================
-# USER GUIDE
+# LOCATION CONTROLLER (MOTHERBOARD)
 # =====================================================
-with st.expander("📘 User Guide"):
-    st.markdown("""
-    *Features*
-    - Network operator detection
-    - 2G / 3G / 4G confidence scoring
-    - Coverage gap identification
-    - PDF planning reports
+st.sidebar.header("📍 Location Controller")
 
-    *How it works*
-    - Enter coordinates
-    - Predict nearby networks
-    - Analyze coverage gaps
-    - Export report
-    """)
+input_lat = st.sidebar.number_input("Latitude", value=6.5244, format="%.6f")
+input_lon = st.sidebar.number_input("Longitude", value=3.3792, format="%.6f")
+buffer_km = st.sidebar.slider("Coverage Radius (km)", 3, 30, 10)
+
+analyze = st.sidebar.button("🔍 Analyze Location")
 
 # =====================================================
 # BASE MAP
 # =====================================================
-def base_map():
-    m = folium.Map([9.1, 8.7], zoom_start=6, tiles="CartoDB positron")
+def base_map(center, zoom=9):
+    m = folium.Map(location=center, zoom_start=zoom, tiles="CartoDB positron")
     folium.GeoJson(nigeria, style_function=lambda x: {"color": "black", "weight": 2}).add_to(m)
     folium.GeoJson(states, style_function=lambda x: {"color": "gray", "weight": 1}).add_to(m)
     return m
@@ -86,134 +76,165 @@ def base_map():
 # =====================================================
 # TABS
 # =====================================================
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🗺 Coverage Map",
-    "📍 Network Prediction",
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🗺 Coverage & No Coverage",
     "⚠ Coverage Gaps",
-    "📄 PDF Report"
+    "📡 Network Prediction",
+    "📍 New Tower Recommendation",
+    "📊 Coverage Density (States)"
 ])
 
 # =====================================================
-# TAB 1 – MAP
+# ANALYSIS
 # =====================================================
-with tab1:
-    m = base_map()
+if analyze and network_df is not None:
+    network_df["distance_km"] = network_df.apply(
+        lambda r: haversine(input_lat, input_lon, r[lat_col], r[lon_col]), axis=1
+    )
 
-    if network_df is not None:
-        lat_col = next(c for c in network_df.columns if "lat" in c.lower())
-        lon_col = next(c for c in network_df.columns if "lon" in c.lower())
-        op_col = next(c for c in network_df.columns if "operator" in c.lower())
+    nearby = network_df.sort_values("distance_km").head(50)
 
-        for _, r in network_df.sample(min(800, len(network_df))).iterrows():
-            folium.CircleMarker(
+    confidence = max(5, 100 - nearby["distance_km"].mean() * 3)
+
+    # =================================================
+    # TAB 1 — COVERAGE & NO COVERAGE
+    # =================================================
+    with tab1:
+        m = base_map([input_lat, input_lon])
+
+        folium.Marker(
+            [input_lat, input_lon],
+            icon=folium.Icon(color="green", icon="signal"),
+            tooltip="Input Location"
+        ).add_to(m)
+
+        # Coverage buffers
+        for _, r in nearby.iterrows():
+            folium.Circle(
                 [r[lat_col], r[lon_col]],
-                radius=2,
+                radius=buffer_km * 1000,
                 color="blue",
-                fill=True
+                fill=True,
+                fill_opacity=0.1
             ).add_to(m)
 
-    st_folium(m, height=600)
+        # No coverage zone
+        folium.Circle(
+            [input_lat, input_lon],
+            radius=buffer_km * 1000,
+            color="red",
+            fill=True,
+            fill_opacity=0.25,
+            tooltip="Potential No Coverage Area"
+        ).add_to(m)
 
-# =====================================================
-# TAB 2 – NETWORK PREDICTION
-# =====================================================
-with tab2:
-    col1, col2 = st.columns(2)
-    lat = col1.number_input("Latitude", value=6.5244, format="%.6f")
-    lon = col2.number_input("Longitude", value=3.3792, format="%.6f")
+        st_folium(m, height=600)
 
-    if st.button("🔮 Predict Network"):
-        if network_df is None:
-            st.warning("Network CSV not loaded")
-        else:
-            network_df["distance"] = network_df.apply(
-                lambda r: haversine(lat, lon, r[lat_col], r[lon_col]), axis=1
-            )
+    # =================================================
+    # TAB 2 — GAP ANALYSIS
+    # =================================================
+    with tab2:
+        m = base_map([input_lat, input_lon])
 
-            nearest = network_df.sort_values("distance").head(30)
+        gaps = nearby[nearby["distance_km"] > buffer_km]
 
-            operators = nearest[op_col].value_counts()
-            tech_conf = {
-                "2G": min(100, 100 - nearest["distance"].mean() * 10),
-                "3G": min(100, 100 - nearest["distance"].mean() * 8),
-                "4G": min(100, 100 - nearest["distance"].mean() * 6),
-            }
-
-            st.success("📡 Network Detected")
-
-            st.subheader("Available Operators")
-            st.write(operators)
-
-            st.subheader("Technology Confidence")
-            st.progress(int(tech_conf["2G"]))
-            st.write("2G:", f"{tech_conf['2G']:.1f}%")
-
-            st.progress(int(tech_conf["3G"]))
-            st.write("3G:", f"{tech_conf['3G']:.1f}%")
-
-            st.progress(int(tech_conf["4G"]))
-            st.write("4G:", f"{tech_conf['4G']:.1f}%")
-
-            m = base_map()
-            folium.Marker([lat, lon], icon=folium.Icon(color="green")).add_to(m)
-
-            for _, r in nearest.head(6).iterrows():
-                folium.CircleMarker([r[lat_col], r[lon_col]], radius=4, color="blue").add_to(m)
-
-            st_folium(m, height=500)
-
-# =====================================================
-# TAB 3 – COVERAGE GAP DETECTION
-# =====================================================
-with tab3:
-    st.subheader("Coverage Gap Zones")
-
-    if network_df is None:
-        st.warning("CSV missing")
-    else:
-        sparse = network_df.groupby(op_col).filter(lambda x: len(x) < 200)
-
-        m = base_map()
-        for _, r in sparse.iterrows():
+        for _, r in gaps.iterrows():
             folium.CircleMarker(
                 [r[lat_col], r[lon_col]],
-                radius=5,
+                radius=6,
                 color="red",
                 fill=True
             ).add_to(m)
 
         st_folium(m, height=600)
-        st.info("Red zones indicate potential coverage gaps")
+        st.warning("Red markers represent coverage gaps")
 
-# =====================================================
-# TAB 4 – PDF REPORT
-# =====================================================
-with tab4:
-    st.subheader("Generate Planning Report")
+    # =================================================
+    # TAB 3 — NETWORK PREDICTION
+    # =================================================
+    with tab3:
+        st.metric("Network Confidence Level", f"{confidence:.1f}%")
 
-    report_lat = st.number_input("Report Latitude", value=6.5244)
-    report_lon = st.number_input("Report Longitude", value=3.3792)
+        st.subheader("Available Operators")
+        st.write(nearby[op_col].value_counts())
 
-    if st.button("📄 Generate PDF"):
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", size=12)
+        st.subheader("Technology Availability")
+        st.write(nearby[gen_col].value_counts())
 
-        pdf.cell(0, 10, "Nigeria Network Coverage Report", ln=True)
-        pdf.cell(0, 10, f"Location: {report_lat}, {report_lon}", ln=True)
-        pdf.cell(0, 10, "Technologies: 2G / 3G / 4G", ln=True)
-        pdf.cell(0, 10, "Operators: MTN, Airtel, Glo, 9mobile", ln=True)
-        pdf.cell(0, 10, "Generated via Streamlit App", ln=True)
+        st.subheader("Nearest Network Sites")
+        st.dataframe(
+            nearby[[op_col, gen_col, "distance_km"]].head(10)
+        )
 
-        path = "network_report.pdf"
-        pdf.output(path)
+    # =================================================
+    # TAB 4 — NEW TOWER RECOMMENDATION
+    # =================================================
+    with tab4:
+        st.subheader("Recommended New Tower Location")
 
-        with open(path, "rb") as f:
-            st.download_button(
-                "⬇ Download PDF Report",
-                f,
-                file_name="Nigeria_Network_Report.pdf",
-                mime="application/pdf"
-            )
+        # Recommend new site at centroid of no-coverage zone
+        rec_lat = input_lat + (buffer_km / 111)
+        rec_lon = input_lon + (buffer_km / 111)
 
-        st.success("Report generated successfully")
+        m = base_map([rec_lat, rec_lon])
+
+        folium.Marker(
+            [rec_lat, rec_lon],
+            icon=folium.Icon(color="purple", icon="tower"),
+            tooltip="Recommended New Tower"
+        ).add_to(m)
+
+        st_folium(m, height=600)
+
+        st.success("Recommended site generated based on coverage gap")
+
+        st.download_button(
+            "⬇ Export Recommended Site",
+            pd.DataFrame([{
+                "Latitude": rec_lat,
+                "Longitude": rec_lon,
+                "Reason": "Coverage Gap",
+                "Priority": "High"
+            }]).to_csv(index=False),
+            file_name="recommended_new_tower.csv",
+            mime="text/csv"
+        )
+
+    # =================================================
+    # TAB 5 — COVERAGE DENSITY PER STATE
+    # =================================================
+    with tab5:
+        st.subheader("Coverage Density per State")
+
+        # Spatial join
+        gdf_points = gpd.GeoDataFrame(
+            network_df,
+            geometry=gpd.points_from_xy(network_df[lon_col], network_df[lat_col]),
+            crs="EPSG:4326"
+        )
+
+        joined = gpd.sjoin(gdf_points, states, how="left", predicate="within")
+
+        density = joined.groupby("NAME_1").size().reset_index(name="Site_Count")
+
+        states_density = states.merge(density, on="NAME_1", how="left").fillna(0)
+
+        m = base_map([9.1, 8.7], zoom=6)
+
+        folium.Choropleth(
+            geo_data=states_density,
+            data=states_density,
+            columns=["NAME_1", "Site_Count"],
+            key_on="feature.properties.NAME_1",
+            fill_color="YlGnBu",
+            fill_opacity=0.7,
+            line_opacity=0.3,
+            legend_name="Network Site Density"
+        ).add_to(m)
+
+        st_folium(m, height=600)
+
+        st.dataframe(density.sort_values("Site_Count", ascending=False))
+
+else:
+    st.info("👈 Enter coordinates and click *Analyze Location*")
