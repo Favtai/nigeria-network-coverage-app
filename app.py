@@ -1,225 +1,229 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import pydeck as pdk
-from math import radians, cos, sin
+import folium
+from geopy.distance import geodesic
 
-# ===============================
-# CONFIG
-# ===============================
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
-    page_title="Nigeria Network Coverage & Planning",
+    page_title="Nigeria Network Coverage & Gap Analysis",
     layout="wide"
 )
 
-st.title("📡 Nigeria Network Coverage, Gap Analysis & 5G Planning Dashboard")
+st.title("📡 Nigeria Network Coverage & Gap Analysis Dashboard")
 
-# ===============================
-# LOAD DATA (SAFE)
-# ===============================
-@st.cache_data
-def load_data():
-    df = pd.read_csv("Nigeria_2G_3G_4G_All_Operators_ArcGIS.csv")
-    df.columns = [c.lower() for c in df.columns]
-
-    # Normalize columns
-    df["latitude"] = df.get("latitude", df.get("lat"))
-    df["longitude"] = df.get("longitude", df.get("lon", df.get("lng")))
-    df["operator"] = df.get("operator", df.get("network", "Unknown"))
-    df["technology"] = df.get("technology", df.get("tech", "Unknown"))
-
-    df = df.dropna(subset=["latitude", "longitude"])
-    return df
-
-df = load_data()
-
-# ===============================
-# SESSION STATE (persist results)
-# ===============================
+# ---------------- SESSION STATE ----------------
 if "analysis_done" not in st.session_state:
     st.session_state.analysis_done = False
 
-# ===============================
-# SIDEBAR INPUT
-# ===============================
-st.sidebar.header("📍 Location Input")
+# ---------------- LOAD DATA ----------------
+@st.cache_data
+def load_data():
+    return pd.read_csv("Nigeria_2G_3G_4G_All_Operators_ArcGIS.csv")
 
-lat = st.sidebar.number_input("Latitude", value=9.0765, format="%.6f")
-lon = st.sidebar.number_input("Longitude", value=7.3986, format="%.6f")
+try:
+    df = load_data()
+except Exception as e:
+    st.error("❌ CSV file not found or failed to load.")
+    st.stop()
 
-radius_km = st.sidebar.slider("Analysis Radius (km)", 1, 100, 10)
-no_limit = st.sidebar.checkbox("No Distance Limit")
+df.columns = df.columns.str.lower()
 
-run = st.sidebar.button("▶ Run Analysis")
+# Detect columns safely
+lat_col = next(c for c in df.columns if "lat" in c)
+lon_col = next(c for c in df.columns if "lon" in c)
+operator_col = next(c for c in df.columns if "operator" in c)
+tech_col = next(c for c in df.columns if "2g" in c or "3g" in c or "4g" in c or "tech" in c)
 
-if run:
+state_col = None
+for c in df.columns:
+    if c in ["state", "admin1", "region"]:
+        state_col = c
+        break
+
+# ---------------- SIDEBAR ----------------
+st.sidebar.header("📍 Input Coordinates")
+
+lat = st.sidebar.number_input("Latitude", value=6.5244, format="%.6f")
+lon = st.sidebar.number_input("Longitude", value=3.3792, format="%.6f")
+
+no_limit = st.sidebar.checkbox("No Distance Limit", value=True)
+radius_km = st.sidebar.slider("Analysis Radius (km)", 5, 100, 20)
+
+if st.sidebar.button("🔍 Run Analysis"):
     st.session_state.analysis_done = True
     st.session_state.lat = lat
     st.session_state.lon = lon
     st.session_state.radius = radius_km
     st.session_state.no_limit = no_limit
 
-# ===============================
-# DISTANCE FUNCTION (FAST)
-# ===============================
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = sin(dlat/2)*2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)*2
-    return 2 * R * np.arcsin(np.sqrt(a))
+# ---------------- TABS ----------------
+tabs = st.tabs([
+    "🗺 Coverage Map",
+    "📊 Results Table",
+    "📥 Export Network",
+    "🚫 Coverage Gaps",
+    "📤 Export Gaps",
+    "🏗 New Tower Recommendation",
+    "📤 Export Towers",
+    "🏙 State Coverage Density",
+    "📘 How It Works"
+])
 
-# ===============================
-# ANALYSIS
-# ===============================
+# ---------------- ANALYSIS ----------------
 if st.session_state.analysis_done:
+    lat0 = st.session_state.lat
+    lon0 = st.session_state.lon
+    radius = st.session_state.radius
+    no_limit = st.session_state.no_limit
 
-    lat = st.session_state.lat
-    lon = st.session_state.lon
-
-    df["distance_km"] = haversine(
-        lat, lon,
-        df["latitude"].values,
-        df["longitude"].values
+    df["distance_km"] = df.apply(
+        lambda r: geodesic((lat0, lon0), (r[lat_col], r[lon_col])).km,
+        axis=1
     )
 
-    if st.session_state.no_limit:
+    if no_limit:
         nearby = df.copy()
     else:
-        nearby = df[df["distance_km"] <= st.session_state.radius]
+        nearby = df[df["distance_km"] <= radius].copy()
 
-    # Detect 5G safely
-    nearby["is_5g"] = nearby["technology"].astype(str).str.contains("5g", case=False)
+    nearby["confidence"] = nearby["distance_km"].apply(
+        lambda d: "High" if d <= 5 else "Medium" if d <= 15 else "Low"
+    )
 
     # Operator colors
     operator_colors = {
-        "mtn": [255, 204, 0],
-        "airtel": [255, 0, 0],
-        "glo": [0, 153, 0],
-        "9mobile": [0, 204, 153]
+        "mtn": "yellow",
+        "airtel": "red",
+        "glo": "green",
+        "9mobile": "blue"
     }
 
-    def colorize(op):
-        return operator_colors.get(str(op).lower(), [100, 100, 100])
-
-    nearby["color"] = nearby["operator"].apply(colorize)
-
-    # ===============================
-    # TABS (11)
-    # ===============================
-    tabs = st.tabs([
-        "📍 Coverage Map",
-        "📊 Results Table",
-        "📡 Operator Coverage",
-        "🕳 Coverage Gaps",
-        "🗼 New Tower Recommendation",
-        "📐 Buffer Visualization",
-        "📶 Technology Mix",
-        "🗺 State Coverage Density",
-        "📈 Sector Analysis",
-        "🚀 5G Planning",
-        "⬇ Export Results"
-    ])
-
-    # ===============================
-    # TAB 1 – MAP
-    # ===============================
+    # ---------------- TAB 1: MAP ----------------
     with tabs[0]:
-        st.subheader("Coverage Map")
+        m = folium.Map(location=[lat0, lon0], zoom_start=10)
 
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            nearby,
-            get_position=["longitude", "latitude"],
-            get_fill_color="color",
-            get_radius=600,
-            pickable=True
-        )
+        folium.Marker(
+            [lat0, lon0],
+            tooltip="Input Location",
+            icon=folium.Icon(color="black")
+        ).add_to(m)
 
-        user_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=pd.DataFrame([{"lat": lat, "lon": lon}]),
-            get_position=["lon", "lat"],
-            get_fill_color=[0, 0, 255],
-            get_radius=1000
-        )
+        if not no_limit:
+            folium.Circle(
+                [lat0, lon0],
+                radius=radius * 1000,
+                color="blue",
+                fill=True,
+                fill_opacity=0.08
+            ).add_to(m)
 
-        st.pydeck_chart(pdk.Deck(
-            initial_view_state=pdk.ViewState(
-                latitude=lat,
-                longitude=lon,
-                zoom=9
-            ),
-            layers=[layer, user_layer]
-        ))
+        for _, r in nearby.iterrows():
+            op = str(r[operator_col]).lower()
+            color = operator_colors.get(op, "gray")
 
-    # ===============================
-    # TAB 2 – TABLE
-    # ===============================
+            folium.CircleMarker(
+                [r[lat_col], r[lon_col]],
+                radius=4,
+                color=color,
+                fill=True,
+                fill_opacity=0.8,
+                tooltip=f"""
+                Operator: {r[operator_col]}<br>
+                Tech: {r[tech_col]}<br>
+                Distance: {r['distance_km']:.2f} km<br>
+                Confidence: {r['confidence']}
+                """
+            ).add_to(m)
+
+        st.components.v1.html(m.repr_html(), height=600)
+
+    # ---------------- TAB 2: TABLE ----------------
     with tabs[1]:
-        st.dataframe(nearby)
-
-    # ===============================
-    # TAB 3 – OPERATOR COVERAGE
-    # ===============================
-    with tabs[2]:
-        st.bar_chart(nearby["operator"].value_counts())
-
-    # ===============================
-    # TAB 4 – COVERAGE GAPS
-    # ===============================
-    with tabs[3]:
-        st.write("Areas beyond radius with no nearby towers")
-        gaps = df[df["distance_km"] > st.session_state.radius]
-        st.dataframe(gaps.head(200))
-
-    # ===============================
-    # TAB 5 – NEW TOWER
-    # ===============================
-    with tabs[4]:
-        if not gaps.empty:
-            rec_lat = gaps["latitude"].mean()
-            rec_lon = gaps["longitude"].mean()
-            st.success(f"Recommended Tower Location: {rec_lat:.5f}, {rec_lon:.5f}")
-
-    # ===============================
-    # TAB 6 – BUFFER
-    # ===============================
-    with tabs[5]:
-        st.write(f"Buffer radius: {st.session_state.radius} km")
-
-    # ===============================
-    # TAB 7 – TECH MIX
-    # ===============================
-    with tabs[6]:
-        st.pie_chart(nearby["technology"].value_counts())
-
-    # ===============================
-    # TAB 8 – STATE DENSITY
-    # ===============================
-    with tabs[7]:
-        if "state" in nearby.columns:
-            st.bar_chart(nearby["state"].value_counts())
-
-    # ===============================
-    # TAB 9 – SECTOR
-    # ===============================
-    with tabs[8]:
-        st.write("Sector-based analysis placeholder (stable)")
-
-    # ===============================
-    # TAB 10 – 5G
-    # ===============================
-    with tabs[9]:
-        st.write("Detected 5G sites")
-        st.dataframe(nearby[nearby["is_5g"]])
-
-    # ===============================
-    # TAB 11 – EXPORT
-    # ===============================
-    with tabs[10]:
-        st.download_button(
-            "Download Nearby Coverage",
-            nearby.to_csv(index=False),
-            "nearby_coverage.csv"
+        st.dataframe(
+            nearby[[operator_col, tech_col, "distance_km", "confidence"]]
+            .sort_values("distance_km")
         )
+
+    # ---------------- TAB 3: EXPORT NETWORK ----------------
+    with tabs[2]:
+        st.download_button(
+            "⬇ Download Network Results",
+            nearby.to_csv(index=False),
+            "network_results.csv",
+            "text/csv"
+        )
+
+    # ---------------- TAB 4: COVERAGE GAPS ----------------
+    with tabs[3]:
+        if nearby.empty:
+            gap_status = "No Coverage"
+            recommendation = "Build new tower"
+        else:
+            gap_status = "Partial Coverage"
+            recommendation = "Coverage improvement needed"
+
+        gap_df = pd.DataFrame([{
+            "latitude": lat0,
+            "longitude": lon0,
+            "coverage_status": gap_status,
+            "network_count": len(nearby),
+            "nearest_distance_km": nearby["distance_km"].min() if not nearby.empty else None,
+            "recommendation": recommendation
+        }])
+
+        st.dataframe(gap_df)
+
+    # ---------------- TAB 5: EXPORT GAPS ----------------
+    with tabs[4]:
+        st.download_button(
+            "⬇ Download Coverage Gaps",
+            gap_df.to_csv(index=False),
+            "coverage_gaps.csv",
+            "text/csv"
+        )
+
+    # ---------------- TAB 6: NEW TOWER ----------------
+    with tabs[5]:
+        tower_df = pd.DataFrame([{
+            "recommended_latitude": lat0 + 0.02,
+            "recommended_longitude": lon0 + 0.02,
+            "reason": "Coverage gap / weak signal",
+            "based_on_networks": len(nearby)
+        }])
+
+        st.dataframe(tower_df)
+
+    # ---------------- TAB 7: EXPORT TOWER ----------------
+    with tabs[6]:
+        st.download_button(
+            "⬇ Download Recommended Tower",
+            tower_df.to_csv(index=False),
+            "recommended_tower.csv",
+            "text/csv"
+        )
+
+    # ---------------- TAB 8: STATE DENSITY ----------------
+    with tabs[7]:
+        if state_col:
+            density = df.groupby(state_col).size().reset_index(name="site_count")
+            st.dataframe(density.sort_values("site_count", ascending=False))
+        else:
+            st.warning("State column not found in dataset")
+
+    # ---------------- TAB 9: GUIDE ----------------
+    with tabs[8]:
+        st.markdown("""
+        ### 📘 How This Dashboard Works
+        - Enter coordinates
+        - Choose radius or no limit
+        - View nearby network coverage
+        - Identify gaps
+        - Get new tower recommendations
+        - Export all results as CSV
+
+        *Data Source:* Nigeria 2G/3G/4G Network Dataset  
+        *No 5G. No GeoJSON. Stable Deployment.*
+        """)
+
+else:
+    st.info("👈 Enter coordinates and click *Run Analysis*")
