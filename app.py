@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import folium
+from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 import numpy as np
 import json
@@ -181,10 +182,11 @@ if st.session_state.analysis_done:
             if len(distances) == 0: continue
             if distances.min() > 8:
                 uncovered.append((glat, glon))
+                # RED = poor/no network
                 folium.Circle([glat, glon], radius=3000, color="red", fill=True, fill_opacity=0.4).add_to(gap_map)
 
-    # Input location
-    folium.Marker([lat, lon], popup="Input Location", icon=folium.Icon(color="blue")).add_to(gap_map)
+    # Input location marker
+    folium.Marker([lat, lon], popup="Your Location", icon=folium.Icon(color="blue")).add_to(gap_map)
 
     # Suggested tower
     if uncovered:
@@ -194,7 +196,7 @@ if st.session_state.analysis_done:
 
     st_folium(gap_map, height=520, width=1100)
 
-    # ================= COVERAGE STATISTICS & MAP (existing app) =================
+    # ================= COVERAGE STATISTICS & MAP =================
     if not nearby.empty:
         st.header("📊 Coverage Statistics")
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -209,6 +211,8 @@ if st.session_state.analysis_done:
         folium.GeoJson(nga, style_function=lambda x: {"fillOpacity": 0, "color": "black", "weight": 1}).add_to(m)
         folium.GeoJson(states, style_function=lambda x: {"fillOpacity": 0, "color": "gray", "weight": 0.5}).add_to(m)
 
+        # CircleMarkers + heatmap
+        heat_data = []
         for _, r in nearby.iterrows():
             tech_color = TECH_COLORS.get(r["Network_Generation"], "#607D8B")
             op_color = OPERATOR_COLORS.get(r["Network_Operator"], "#1976D2")
@@ -222,13 +226,32 @@ if st.session_state.analysis_done:
                 fill_opacity=0.9,
                 popup=f"<b>Operator:</b> {r['Network_Operator']}<br><b>Technology:</b> {r['Network_Generation']}<br><b>Distance:</b> {r['distance_km']:.2f} km"
             ).add_to(m)
+            heat_data.append([r["Latitude"], r["Longitude"]])
+
+        # Input location marker
+        folium.Marker([lat, lon], popup="Your Location", icon=folium.Icon(color="blue")).add_to(m)
 
         folium.Circle([lat, lon], radius=radius_km*1000, color="blue").add_to(m)
 
-        # Legend
+        # Add HeatMap Layer
+        if heat_data:
+            HeatMap(heat_data, radius=25, blur=15, max_zoom=10).add_to(m)
+
+        # Legend Box
         legend_html = """
-         <div style="position: fixed; bottom: 50px; left: 50px; width: 200px; height: 160px; 
-                     border:2px solid grey; z-index:9999; font-size:14px; background-color:white; padding:10px;">
+         <div style="
+             position: fixed;
+             bottom: 50px;
+             left: 50px;
+             width: 220px;
+             height: 180px;
+             z-index:9999;
+             font-size:14px;
+             background-color:white;
+             border:2px solid grey;
+             padding:10px;
+             box-shadow: 3px 3px 5px rgba(0,0,0,0.3);
+             ">
          <b>Operator (Fill):</b><br>
          <i style="background:#FFD700;color:#FFD700;">....</i> MTN Nigeria<br>
          <i style="background:#FF0000;color:#FF0000;">....</i> Airtel Nigeria<br>
@@ -243,23 +266,15 @@ if st.session_state.analysis_done:
         m.get_root().html.add_child(folium.Element(legend_html))
         st_folium(m, height=520, width=1100)
 
-        # Technology Summary
+        # Technology Summary Bar Chart
         st.header("📡 Technology Summary")
-        st.dataframe(
-            nearby["Network_Generation"].value_counts()
-            .reset_index()
-            .rename(columns={"index": "Technology", "Network_Generation": "Sites"})
-        )
+        tech_summary = nearby["Network_Generation"].value_counts()
+        st.bar_chart(tech_summary)
 
-        # Operator Summary
+        # Operator Summary Bar Chart
         st.header("🏢 Operator Operational Summary")
-        st.dataframe(
-            nearby.groupby("Network_Operator").agg(
-                Sites=("Network_Operator", "count"),
-                Avg_Distance_km=("distance_km", "mean"),
-                Dominant_Tech=("Network_Generation", lambda x: x.mode()[0])
-            ).reset_index()
-        )
+        op_summary = nearby["Network_Operator"].value_counts()
+        st.bar_chart(op_summary)
 
         # Coverage Density
         st.header("🗺 Coverage Density by State")
