@@ -1,332 +1,196 @@
 import streamlit as st
-import pandas as pd
+import geopandas as gpd
 import folium
-from folium.plugins import HeatMap
-from streamlit_folium import st_folium
-import numpy as np
-import json
-from math import radians, cos
+from streamlit_folium import folium_static
+from shapely.geometry import Point
 
-# ==================================================
-# PAGE CONFIG
-# ==================================================
+# ==========================================
+# 1. PAGE CONFIG & STYLING
+# ==========================================
 st.set_page_config(
-    page_title="Nigeria Network Coverage & Planning App",
-    layout="wide"
+    layout="wide", 
+    page_title="Spectrum: National Coverage Verifier",
+    page_icon="📡"
 )
 
-st.title("📡 Nigeria Network Coverage & Planning App")
+# Custom CSS for professional metric styling
+st.markdown("""
+    <style>
+    div[data-testid="stMetricValue"] {
+        font-size: 24px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-# ================= USER GUIDE =================
-with st.expander("📖 User Guide / How to Use This App", expanded=False):
-    st.markdown("""
-    ## Overview
-    This app allows you to:
-    - Visualize 2G, 3G, 4G network coverage across Nigeria.
-    - Predict the best network operator at your location.
-    - Identify poor/no coverage areas and suggest new tower locations.
-    - Analyze coverage density per state.
-    - Export data and view operator & technology summaries.
+st.title("📡 Spectrum | National Coverage Verification")
+st.markdown("### Network Coverage Verification Engine")
+st.markdown("Verifies 2G/3G/4G coverage availability across all 36 States + FCT")
+st.markdown("---")
 
-    ## Steps to Use
-    1. Enter your **Latitude** and **Longitude** in the sidebar.
-    2. Select the **Coverage Radius** (5–100 km).
-    3. Click **🔍 Analyze**.
-
-    ## Outputs
-    - **Coverage Map:** Shows sites with color coding (operator fill, tech border) + heatmap + input location.
-    - **Network Predictor:** Shows strongest network nearby or nearest site if no coverage.
-    - **No Coverage Map:** Red circles = poor/no network, blue = your location, suggested tower in red.
-    - **Statistics:** Metrics, bar charts, coverage density per state.
-    - **Export:** Download nearby site data as CSV.
-    - **Operational Summary:** Key insights and recommendations.
-
-    ## Example Coordinates
-    | Location | Latitude | Longitude | Radius | Expected Outcome |
-    |----------|----------|-----------|--------|-----------------|
-    | Lagos | 6.5244 | 3.3792 | 30 | Multiple sites, heatmap, predictor |
-    | Sparse area | 7.2000 | 5.0000 | 30 | Likely no coverage, suggested tower |
-    | Abuja | 9.0578 | 7.4951 | 40 | Best network prediction, coverage density |
-
-    ## Tips
-    - Ensure CSV and GeoJSON files are in the same folder as `app.py`.
-    - Use larger radius to see wider coverage, smaller for local analysis.
-    - Heatmap highlights dense network areas.
-    - Export CSV for GIS or reporting.
-    """)
-
-# ==================================================
-# DATA LOADING
-# ==================================================
-@st.cache_data
-def load_csv():
-    df = pd.read_csv("Nigeria_2G_3G_4G_All_Operators_ArcGIS.csv")
-
-    for col in ["Latitude", "Longitude", "Network_Operator", "Network_Generation", "State"]:
-        if col not in df.columns:
-            df[col] = "UNKNOWN"
-
-    df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
-    df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
-    df = df.dropna(subset=["Latitude", "Longitude"])
-
-    df["Network_Operator"] = df["Network_Operator"].astype(str).str.upper()
-    df["Network_Operator"] = df["Network_Operator"].replace({
-        r".*MTN.*": "MTN Nigeria",
-        r".*AIRTEL.*": "Airtel Nigeria",
-        r".*GLO.*": "Globacom",
-        r".*9.*MOBILE.*": "9mobile"
-    }, regex=True)
-
-    df["Network_Generation"] = df["Network_Generation"].astype(str).str.upper()
-    df["Network_Generation"] = df["Network_Generation"].replace({
-        r".*LTE.*": "4G",
-        r".*4G.*": "4G",
-        r".*UMTS.*": "3G",
-        r".*HSPA.*": "3G",
-        r".*3G.*": "3G",
-        r".*EDGE.*": "2G",
-        r".*GSM.*": "2G",
-        r".*2G.*": "2G"
-    }, regex=True)
-
-    df["Network_Operator"] = df["Network_Operator"].fillna("UNKNOWN")
-    df["Network_Generation"] = df["Network_Generation"].fillna("UNKNOWN")
-
-    return df
+# ==========================================
+# 2. DATA LOADING
+# ==========================================
+COVERAGE_FILE = "buffered_towers.gpkg"
+STATES_FILE = "gadm41_NGA_1.geojson"
 
 @st.cache_data
-def load_geojson(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_data():
+    try:
+        # Load Coverage & Force Lat/Lon (EPSG:4326)
+        gdf_cov = gpd.read_file(COVERAGE_FILE, layer="buffered_towers")
+        if gdf_cov.crs != "EPSG:4326":
+            gdf_cov = gdf_cov.to_crs("EPSG:4326")
+            
+        # Load States & Force Lat/Lon
+        gdf_states = gpd.read_file(STATES_FILE)
+        if gdf_states.crs != "EPSG:4326":
+            gdf_states = gdf_states.to_crs("EPSG:4326")
+            
+        return gdf_cov, gdf_states
+    except Exception as e:
+        st.error(f"Critical Data Error: {e}")
+        return gpd.GeoDataFrame(), gpd.GeoDataFrame()
 
-df = load_csv()
-nga = load_geojson("gadm41_NGA_0.geojson")
-states = load_geojson("gadm41_NGA_1.geojson")
+with st.spinner("Initializing National Geospatial Database..."):
+    gdf_coverage, gdf_states = load_data()
 
-# ==================================================
-# COLORS
-# ==================================================
-OPERATOR_COLORS = {
-    "MTN Nigeria": "#FFD700",
-    "Airtel Nigeria": "#FF0000",
-    "Globacom": "#008000",
-    "9mobile": "#000000"
-}
+# ==========================================
+# 3. SIDEBAR CONTROLS
+# ==========================================
+if "run_analysis" not in st.session_state:
+    st.session_state.run_analysis = False
 
-TECH_COLORS = {
-    "2G": "#9E9E9E",
-    "3G": "#2196F3",
-    "4G": "#9C27B0"
-}
-
-# ==================================================
-# HAVERSINE FUNCTION
-# ==================================================
-def haversine_np(lat, lon, lats, lons):
-    R = 6371
-    lat = np.radians(lat)
-    lon = np.radians(lon)
-    lats = np.radians(lats)
-    lons = np.radians(lons)
-    dlat = lats - lat
-    dlon = lons - lon
-    a = np.sin(dlat / 2)**2 + np.cos(lat) * np.cos(lats) * np.sin(dlon / 2)**2
-    return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-
-# ==================================================
-# SIDEBAR INPUTS
-# ==================================================
-st.sidebar.header("📍 Analysis Settings")
-lat = st.sidebar.number_input("Latitude", value=6.5244, format="%.6f")
-lon = st.sidebar.number_input("Longitude", value=3.3792, format="%.6f")
-radius_km = st.sidebar.slider("Coverage Radius (km)", 5, 100, 30)
-analyze = st.sidebar.button("🔍 Analyze")
-
-# ==================================================
-# SESSION STATE
-# ==================================================
-for key in ["analysis_done", "nearby", "lat", "lon", "radius_km"]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-
-# ==================================================
-# RUN ANALYSIS
-# ==================================================
-if analyze:
-    df["distance_km"] = haversine_np(lat, lon, df["Latitude"].values, df["Longitude"].values)
-    nearby = df[df["distance_km"] <= radius_km].copy()
+with st.sidebar:
+    st.header("📍 Search Parameters")
     
-    st.session_state.nearby = nearby
-    st.session_state.lat = lat
-    st.session_state.lon = lon
-    st.session_state.radius_km = radius_km
-    st.session_state.analysis_done = True
+    with st.form("search_form"):
+        # Default Coordinates: Wuse 2, Abuja
+        lat = st.number_input("Latitude", value=9.05785, format="%.6f")
+        lon = st.number_input("Longitude", value=7.49508, format="%.6f")
+        
+        submitted = st.form_submit_button("🔍 Verify Coverage", type="primary")
+        
+    if submitted:
+        st.session_state.run_analysis = True
+        
+    st.markdown("---")
+    st.caption("v1.0.0 | Competition Build")
 
-# ==================================================
-# DISPLAY RESULTS
-# ==================================================
-if st.session_state.analysis_done:
-    nearby = st.session_state.nearby
-    lat = st.session_state.lat
-    lon = st.session_state.lon
-    radius_km = st.session_state.radius_km
-
-    # ================= NETWORK PREDICTOR =================
-    st.subheader("📡 Network Predictor")
-
-    if nearby.empty:
-        st.warning("❌ No network detected nearby.")
-
-        # Find nearest site for prediction
-        all_distances = haversine_np(lat, lon, df["Latitude"].values, df["Longitude"].values)
-        nearest_idx = all_distances.argmin()
-        nearest_site = df.iloc[nearest_idx]
-        st.info(f"Nearest site is {all_distances[nearest_idx]:.2f} km away ({nearest_site['Network_Operator']}, {nearest_site['Network_Generation']})")
-
-        # Suggested new tower location (midpoint)
-        rlat = (lat + nearest_site["Latitude"]) / 2
-        rlon = (lon + nearest_site["Longitude"]) / 2
-        st.success(f"📍 Suggested New Tower Location: {rlat:.6f}, {rlon:.6f}")
-        st.info(f"Recommended Operator: {nearest_site['Network_Operator']}")
-        st.info(f"Recommended Technology: {nearest_site['Network_Generation']}")
-
-    else:
-        # Predict the strongest network in the area
-        summary = nearby.groupby(
-            ["Network_Operator", "Network_Generation"]
-        ).size().reset_index(name="Count")
-        best = summary.sort_values("Count", ascending=False).iloc[0]
-        confidence = int(best["Count"] / summary["Count"].sum() * 100)
-        st.success(f"Best Network: {best['Network_Operator']} ({best['Network_Generation']})")
-        st.info(f"Confidence Level: {confidence}%")
-        st.dataframe(summary)
-
-    # ================= NO COVERAGE / NEW TOWER MAP =================
-    st.header("🚫 No Coverage & Tower Recommendation Map")
-
-    gap_map = folium.Map(location=[lat, lon], zoom_start=8)
-    folium.GeoJson(nga, style_function=lambda x: {"fillOpacity": 0, "color": "black", "weight": 1}).add_to(gap_map)
-    folium.GeoJson(states, style_function=lambda x: {"fillOpacity": 0, "color": "gray", "weight": 0.5}).add_to(gap_map)
-
-    uncovered = []
-    grid_step = 15
-
-    for dx in range(-radius_km, radius_km + 1, grid_step):
-        for dy in range(-radius_km, radius_km + 1, grid_step):
-            glat = lat + dx / 111
-            glon = lon + dy / (111 * cos(radians(lat)))
-            distances = haversine_np(glat, glon, df["Latitude"].values, df["Longitude"].values)
-            if len(distances) == 0: continue
-            if distances.min() > 8:
-                uncovered.append((glat, glon))
-                folium.Circle([glat, glon], radius=3000, color="red", fill=True, fill_opacity=0.4).add_to(gap_map)
-
-    # Input location marker
-    folium.Marker([lat, lon], popup="Your Location", icon=folium.Icon(color="blue")).add_to(gap_map)
-
-    # Suggested tower
-    if uncovered:
-        rlat, rlon = uncovered[0]
-        folium.Marker([rlat, rlon], popup="Suggested Tower", icon=folium.Icon(color="red")).add_to(gap_map)
-        st.success(f"📍 Suggested Tower Location: {rlat:.6f}, {rlon:.6f}")
-
-    st_folium(gap_map, height=520, width=1100)
-
-    # ================= COVERAGE STATISTICS & MAP =================
-    if not nearby.empty:
-        st.header("📊 Coverage Statistics")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total Sites", len(nearby))
-        c2.metric("Operators", nearby["Network_Operator"].nunique())
-        c3.metric("4G Sites", (nearby["Network_Generation"] == "4G").sum())
-        c4.metric("3G Sites", (nearby["Network_Generation"] == "3G").sum())
-        c5.metric("2G Sites", (nearby["Network_Generation"] == "2G").sum())
-
-        st.header("📶 Coverage Map")
-        m = folium.Map(location=[lat, lon], zoom_start=8)
-        folium.GeoJson(nga, style_function=lambda x: {"fillOpacity": 0, "color": "black", "weight": 1}).add_to(m)
-        folium.GeoJson(states, style_function=lambda x: {"fillOpacity": 0, "color": "gray", "weight": 0.5}).add_to(m)
-
-        heat_data = []
-        for _, r in nearby.iterrows():
-            tech_color = TECH_COLORS.get(r["Network_Generation"], "#607D8B")
-            op_color = OPERATOR_COLORS.get(r["Network_Operator"], "#1976D2")
-            folium.CircleMarker(
-                [r["Latitude"], r["Longitude"]],
-                radius=7,
-                weight=2,
-                color=tech_color,
-                fill=True,
-                fill_color=op_color,
-                fill_opacity=0.9,
-                popup=f"<b>Operator:</b> {r['Network_Operator']}<br><b>Technology:</b> {r['Network_Generation']}<br><b>Distance:</b> {r['distance_km']:.2f} km"
+# ==========================================
+# 4. MAIN ANALYSIS ENGINE
+# ==========================================
+if st.session_state.run_analysis:
+    
+    # 1. Create the User Point
+    raw_point = Point(lon, lat)
+    
+    # 2. Add Tolerance (Buffer 5m)
+    user_geometry = raw_point.buffer(0.00005)
+    
+    # 3. State Check
+    state_match = gdf_states[gdf_states.intersects(user_geometry)]
+    state_name = state_match.iloc[0]['NAME_1'] if not state_match.empty else "Unknown Region"
+    
+    # 4. Coverage Check
+    # Step A: Fast Filter
+    possible_matches = list(gdf_coverage.sindex.query(user_geometry, predicate='intersects'))
+    matches = gdf_coverage.iloc[possible_matches]
+    
+    # Step B: Precision Check
+    exact_matches = matches[matches.intersects(user_geometry)]
+    
+    # ==========================================
+    # 5. RESULTS DASHBOARD
+    # ==========================================
+    col1, col2 = st.columns([2, 1])
+    
+    # --- LEFT: MAP VISUALIZATION ---
+    with col1:
+        st.subheader(f"🗺️ Geospatial View: {state_name}")
+        
+        m = folium.Map(location=[lat, lon], zoom_start=14, tiles="CartoDB positron")
+        
+        # User Pin
+        folium.Marker(
+            [lat, lon], popup="Query Location", 
+            icon=folium.Icon(color="red", icon="crosshairs", prefix="fa")
+        ).add_to(m)
+        
+        # Highlight State Boundary (Blue border, transparent fill)
+        # This gives context without cluttering the map with green blobs
+        if not state_match.empty:
+            folium.GeoJson(
+                state_match,
+                name="State Boundary",
+                style_function=lambda x: {
+                    'fillColor': '#3498db', 
+                    'color': '#2980b9', 
+                    'weight': 3, 
+                    'fillOpacity': 0.1
+                }
             ).add_to(m)
-            heat_data.append([r["Latitude"], r["Longitude"]])
+            
+        # Render Static Map
+        folium_static(m, width=950, height=500)
 
-        folium.Marker([lat, lon], popup="Your Location", icon=folium.Icon(color="blue")).add_to(m)
-        folium.Circle([lat, lon], radius=radius_km*1000, color="blue").add_to(m)
+    # --- RIGHT: INTELLIGENCE REPORT ---
+    with col2:
+        st.subheader("📊 Signal Intelligence")
+        
+        if exact_matches.empty:
+            st.error("❌ No Active Service")
+            st.metric("Coverage Status", "Disconnected")
+            st.warning(f"No signal found within 5m of these coordinates in **{state_name}**.")
+        else:
+            st.success("✅ Active Service Confirmed")
+            
+            # --- INTELLIGENT METRICS ---
+            # 1. Total Operators (Who is here?)
+            num_ops = exact_matches['Network_Operator'].nunique()
+            
+            # 2. Best Tech (Instead of raw count)
+            # We check what generations are present and pick the 'Winner'
+            all_gens = exact_matches['Network_Generation'].unique()
+            if "4G" in all_gens or "LTE" in all_gens:
+                best_tech = "4G LTE"
+                delta_color = "normal" 
+            elif "3G" in all_gens:
+                best_tech = "3G (Broadband)"
+                delta_color = "off"
+            else:
+                best_tech = "2G (Voice Only)"
+                delta_color = "off"
 
-        if heat_data:
-            HeatMap(heat_data, radius=25, blur=15, max_zoom=10).add_to(m)
+            m1, m2 = st.columns(2)
+            m1.metric("Operators Available", num_ops)
+            m2.metric("Max Network Speed", best_tech, delta_color=delta_color)
+            
+            st.divider()
+            
+            # Operator Breakdown
+            st.markdown("### Network Details")
+            unique_ops = exact_matches['Network_Operator'].unique()
+            
+            for op in unique_ops:
+                op_data = exact_matches[exact_matches['Network_Operator'] == op]
+                gens = sorted(op_data['Network_Generation'].unique())
+                
+                badges = ""
+                for g in gens:
+                    color = "blue" if "4G" in g else "orange" if "3G" in g else "grey"
+                    badges += f":{color}[**{g}**] "
+                
+                st.markdown(f"**{op}** — {badges}")
 
-        legend_html = """
-         <div style="
-             position: fixed;
-             bottom: 50px;
-             left: 50px;
-             width: 220px;
-             height: 180px;
-             z-index:9999;
-             font-size:14px;
-             background-color:white;
-             border:2px solid grey;
-             padding:10px;
-             box-shadow: 3px 3px 5px rgba(0,0,0,0.3);
-             ">
-         <b>Operator (Fill):</b><br>
-         <i style="background:#FFD700;color:#FFD700;">....</i> MTN Nigeria<br>
-         <i style="background:#FF0000;color:#FF0000;">....</i> Airtel Nigeria<br>
-         <i style="background:#008000;color:#008000;">....</i> Globacom<br>
-         <i style="background:#000000;color:#000000;">....</i> 9mobile<br>
-         <b>Tech (Border):</b><br>
-         <i style="border:2px solid #9E9E9E;">....</i> 2G<br>
-         <i style="border:2px solid #2196F3;">....</i> 3G<br>
-         <i style="border:2px solid #9C27B0;">....</i> 4G<br>
-         </div>
-         """
-        m.get_root().html.add_child(folium.Element(legend_html))
-        st_folium(m, height=520, width=1100)
+            # Raw Data Expander
+            with st.expander("📂 View Technical Data"):
+                cols = [c for c in ['Network_Operator', 'Network_Generation', 'Radio_Technology'] if c in exact_matches.columns]
+                st.dataframe(exact_matches[cols].drop_duplicates(), hide_index=True)
 
-        # Technology Summary
-        st.header("📡 Technology Summary")
-        st.bar_chart(nearby["Network_Generation"].value_counts())
+# Footer
+st.info("Feel free to use our [3D MAST PLANNER](https://mast3dplanner.streamlit.app/) to plan " \
+        "your network deployments effectively.")
 
-        # Operator Summary
-        st.header("🏢 Operator Operational Summary")
-        st.bar_chart(nearby["Network_Operator"].value_counts())
-
-        # Coverage Density by State
-        st.header("🗺 Coverage Density by State")
-        st.dataframe(
-            nearby.groupby("State").size()
-            .reset_index(name="Detected_Sites")
-            .sort_values("Detected_Sites", ascending=False)
-        )
-
-        # Export
-        st.header("📤 Export Results")
-        csv = nearby.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇ Download Analysis CSV", csv, "network_coverage_analysis.csv", "text/csv")
-
-        # Operational Summary
-        st.header("🧾 Operational Summary")
-        st.markdown(f"""
-        - **{len(nearby)} network sites** detected within **{radius_km} km**
-        - **{nearby['Network_Operator'].nunique()} operators** active
-        - **4G dominance** indicates moderate/high data capacity
-        - Coverage gaps detected → infrastructure expansion recommended
-        """)
-
-else:
-    st.info("👈 Enter coordinates and click Analyze")
+st.markdown("<hr>", unsafe_allow_html=True)
+st.markdown("Made with ❤️ by [Group B](https://www.linkedin.com/in/favour-taiwo-57232023a/) for GIC competition " \
+                "with special thanks to [opencellid](https://www.opencellid.org/) for for the dataset.")
